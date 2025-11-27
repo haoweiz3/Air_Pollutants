@@ -3,15 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no" />
-  <title>Air Pollutant Interpolation (IDW)</title>
+  <title>Air Pollutant Interpolation (Daily Only)</title>
 
   <!-- Load ArcGIS CSS -->
   <link rel="stylesheet" href="https://js.arcgis.com/4.28/esri/themes/light/main.css" />
 
-  <!-- Load Third-Party Libraries BEFORE ArcGIS JS API -->
+  <!-- Load Third-Party Libraries -->
   <script src="https://unpkg.com/@turf/turf/turf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
-  <!-- Load JSZip for handling zipped CSVs -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
   <!-- Load ArcGIS Maps SDK for JavaScript -->
@@ -30,31 +29,32 @@
       top: 20px;
       right: 20px;
       background-color: white;
-      padding: 15px;
+      padding: 20px;
       border-radius: 8px;
       box-shadow: 0 2px 10px rgba(0,0,0,0.3);
-      width: 250px;
+      width: 280px;
       font-family: "Avenir Next", "Helvetica Neue", Helvetica, Arial, sans-serif;
       z-index: 99;
     }
 
-    #controls h3 {
+    h3 {
       margin-top: 0;
       color: #0079c1;
       font-size: 1.2rem;
-    }
-
-    .form-group {
       margin-bottom: 15px;
+      border-bottom: 2px solid #eee;
+      padding-bottom: 10px;
     }
 
+    .form-group { margin-bottom: 15px; }
+    
     label {
       display: block;
       margin-bottom: 5px;
       font-weight: bold;
       font-size: 0.9rem;
     }
-
+    
     select {
       width: 100%;
       padding: 8px;
@@ -64,18 +64,17 @@
     }
 
     #status {
-      margin-top: 10px;
+      margin-top: 15px;
+      padding-top: 10px;
+      border-top: 1px solid #eee;
       font-size: 0.85rem;
       color: #555;
       font-style: italic;
       min-height: 1.2em;
     }
     
-    .error-msg {
-        color: #d90000 !important;
-        font-weight: bold;
-        font-style: normal !important;
-    }
+    .error-msg { color: #d90000 !important; font-weight: bold; font-style: normal !important; }
+    .success-msg { color: #28a745 !important; font-weight: bold; font-style: normal !important; }
   </style>
 </head>
 
@@ -83,258 +82,221 @@
   <div id="viewDiv"></div>
 
   <div id="controls">
-    <h3>Interpolation Settings</h3>
+    <h3>Daily Air Quality (VOC)</h3>
     
     <div class="form-group">
-      <label for="dateSelect">Select Date:</label>
+      <label>Select Date:</label>
       <select id="dateSelect" disabled>
         <option value="">Loading data...</option>
       </select>
     </div>
 
     <div class="form-group">
-      <label for="compoundSelect">Select Compound:</label>
+      <label>Select Compound:</label>
       <select id="compoundSelect" disabled>
         <option value="">-- First Select Date --</option>
       </select>
     </div>
     
-    <div id="status">Waiting for data...</div>
+    <div id="status">Initializing...</div>
   </div>
 
   <script>
+    // ---------------------------------------------------------
+    // GLOBAL STATE
+    // ---------------------------------------------------------
+    let dailyData = [];
+    const DATA_URL = "https://raw.githubusercontent.com/gladcolor/air_pollutants/master/VOC_With_Coords.zip";
+
     require([
-      "esri/WebMap",
-      "esri/views/MapView",
-      "esri/layers/GeoJSONLayer",
-      "esri/widgets/Legend",
-      "esri/widgets/Expand"
+      "esri/WebMap", "esri/views/MapView", "esri/layers/GeoJSONLayer",
+      "esri/widgets/Legend", "esri/widgets/Expand"
     ], function(WebMap, MapView, GeoJSONLayer, Legend, Expand) {
 
+      // 1. Initialize Map (Forced Center on Beaumont)
       const webmap = new WebMap({
-        portalItem: {
-          id: "63a264ef1b5f4bbab8cdb2b592c29ae6" 
-        }
+        portalItem: { id: "63a264ef1b5f4bbab8cdb2b592c29ae6" },
+        basemap: "gray-vector" 
       });
 
       const view = new MapView({
         container: "viewDiv",
-        map: webmap
+        map: webmap,
+        center: [-94.1, 30.08],
+        zoom: 11
       });
 
-      const legend = new Legend({ view: view });
-      const legendExpand = new Expand({
-        view: view,
-        content: legend,
-        expanded: true
-      });
-      view.ui.add(legendExpand, "bottom-left");
+      view.ui.add(new Expand({ view: view, content: new Legend({ view: view }), expanded: true }), "bottom-left");
 
-      let allData = [];
-      let interpolationLayer = null;
-      let pointsLayer = null;
+      // Global Layer Refs
+      window.webmap = webmap;
+      window.interpolationLayer = null;
+      window.pointsLayer = null;
+
+      // Start Data Load
+      loadData(DATA_URL);
 
       // ---------------------------------------------------------
-      // DATA CONFIGURATION
+      // DATA LOADER (Optimized Blob Extraction)
       // ---------------------------------------------------------
-      // Using the DIRECT raw.githubusercontent.com link to fix CORS errors
-      const dataUrl = "https://raw.githubusercontent.com/gladcolor/air_pollutants/refs/heads/master/VOC_With_Coords.zip";
-      // ---------------------------------------------------------
-
-      // Data Loader Logic
-      loadData(dataUrl);
-
       function loadData(url) {
         const statusDiv = document.getElementById("status");
-        
-        if (url.endsWith(".zip")) {
-            statusDiv.textContent = "Downloading ZIP...";
-            
-            fetch(url)
-                .then(response => {
-                    if (!response.ok) throw new Error("Network response was not ok: " + response.statusText);
-                    return response.arrayBuffer();
-                })
-                .then(data => {
-                    statusDiv.textContent = "Unzipping...";
-                    return JSZip.loadAsync(data);
-                })
-                .then(zip => {
-                    // Extract the first file found in the zip
-                    const filename = Object.keys(zip.files)[0];
-                    if (!filename) throw new Error("ZIP file is empty");
-                    
-                    console.log("Unzipping file:", filename);
-                    statusDiv.textContent = "Parsing CSV...";
-                    return zip.files[filename].async("string");
-                })
-                .then(csvText => {
-                    parseCSV(csvText, false); // false = input is string, not URL
-                })
-                .catch(error => {
-                    console.error("Error loading zip:", error);
-                    statusDiv.textContent = "Failed to load ZIP.";
-                    statusDiv.className = "error-msg";
-                    // Fallback suggestion for user
-                    if(error.message.includes("Network")) {
-                        alert("CORS Error: The browser blocked the download. Please ensure you are using the 'raw.githubusercontent.com' link.");
-                    }
-                });
+        statusDiv.textContent = "Downloading ZIP...";
 
-        } else {
-            // Standard CSV URL load
-            statusDiv.textContent = "Downloading CSV...";
-            parseCSV(url, true); // true = input is URL
-        }
+        fetch(url)
+            .then(r => {
+                if (!r.ok) throw new Error(`Network Error ${r.status}`);
+                return r.arrayBuffer();
+            })
+            .then(d => JSZip.loadAsync(d))
+            .then(zip => {
+                const filename = Object.keys(zip.files).find(name => 
+                    name.toLowerCase().endsWith('.csv') && !name.startsWith('__MACOSX')
+                );
+                if (!filename) throw new Error("No CSV found in ZIP");
+                
+                statusDiv.textContent = "Extracting CSV...";
+                return zip.files[filename].async("blob"); // Extract as Blob (Efficient)
+            })
+            .then(blob => parseCSV(blob))
+            .catch(e => {
+                console.error(e);
+                statusDiv.textContent = "Error: " + e.message;
+                statusDiv.className = "error-msg";
+            });
       }
 
-      function parseCSV(input, isUrl) {
-          Papa.parse(input, {
-            download: isUrl, 
+      function parseCSV(fileBlob) {
+          const statusDiv = document.getElementById("status");
+          statusDiv.textContent = "Parsing CSV...";
+
+          Papa.parse(fileBlob, {
             header: true,
             dynamicTyping: true,
             skipEmptyLines: true,
+            worker: true, // Run in background thread
             complete: function(results) {
-              allData = results.data;
-              console.log("Data loaded:", allData.length, "rows");
-              document.getElementById("status").textContent = "Data Ready.";
-              initApp(allData);
+              if (!results.data || results.data.length === 0) {
+                  statusDiv.textContent = "Error: CSV is empty.";
+                  return;
+              }
+              dailyData = results.data;
+              initUI();
+              statusDiv.textContent = "Data Ready. Select a date.";
+              statusDiv.className = "success-msg";
             },
-            error: function(err) {
-              document.getElementById("status").textContent = "Error parsing CSV.";
-              console.error(err);
+            error: function(err) { 
+                console.error(err); 
+                statusDiv.textContent = "CSV Parse Error";
+                statusDiv.className = "error-msg";
             }
           });
       }
 
-      function initApp(data) {
-        const dateSelect = document.getElementById("dateSelect");
-        const compoundSelect = document.getElementById("compoundSelect");
-
-        const dates = [...new Set(data.map(d => d.Date_collect))].filter(Boolean).sort();
-
-        // Populate Date Dropdown
-        dateSelect.innerHTML = `<option value="">-- Select Date --</option>`;
-        dates.forEach(date => {
-          const option = document.createElement("option");
-          option.value = date;
-          option.textContent = date;
-          dateSelect.appendChild(option);
-        });
-
-        // Initialize Compound Dropdown
-        compoundSelect.innerHTML = `<option value="">-- Select Compound --</option>`;
-
-        // Add Event Listeners
-        dateSelect.addEventListener("change", () => {
-            updateCompoundDropdown(data);
-            checkAndRunInterpolation();
-        });
-        
-        compoundSelect.addEventListener("change", () => {
-            checkAndRunInterpolation();
-        });
-
-        // Enable Inputs
-        dateSelect.disabled = false;
-        compoundSelect.disabled = false;
-        document.getElementById("status").textContent = "Please select a date.";
-      }
-
-      function updateCompoundDropdown(data) {
-          const dateSelect = document.getElementById("dateSelect");
-          const compoundSelect = document.getElementById("compoundSelect");
-          const selectedDate = dateSelect.value;
+      // ---------------------------------------------------------
+      // UI LOGIC
+      // ---------------------------------------------------------
+      function initUI() {
+          const dSelect = document.getElementById("dateSelect");
+          const cSelect = document.getElementById("compoundSelect");
           
-          const previousCompound = compoundSelect.value;
-
-          compoundSelect.innerHTML = `<option value="">-- Select Compound --</option>`;
-
-          if (!selectedDate) {
-              compoundSelect.innerHTML = `<option value="">-- First Select Date --</option>`;
-              return;
-          }
-
-          const relevantData = data.filter(d => d.Date_collect === selectedDate);
-          const compounds = [...new Set(relevantData.map(d => d.Compound))].filter(Boolean).sort();
+          // Get unique dates
+          const dates = [...new Set(dailyData.map(d => d.Date_collect))].filter(Boolean).sort();
           
-          if(compounds.length === 0) {
-              const option = document.createElement("option");
-              option.textContent = "No data for this date";
-              compoundSelect.appendChild(option);
-              return;
-          }
+          dSelect.innerHTML = `<option value="">-- Select Date --</option>`;
+          dates.forEach(d => dSelect.innerHTML += `<option value="${d}">${d}</option>`);
 
-          compounds.forEach(comp => {
-            const option = document.createElement("option");
-            option.value = comp;
-            option.textContent = comp;
-            compoundSelect.appendChild(option);
+          dSelect.disabled = false;
+          cSelect.disabled = false;
+
+          dSelect.addEventListener("change", () => { 
+              updateCompounds();
+              checkRun();
           });
-
-          if (previousCompound && compounds.includes(previousCompound)) {
-              compoundSelect.value = previousCompound;
-          }
+          
+          cSelect.addEventListener("change", checkRun);
       }
 
-      function checkAndRunInterpolation() {
-          const selectedDate = document.getElementById("dateSelect").value;
-          const selectedCompound = document.getElementById("compoundSelect").value;
+      function updateCompounds() {
+          const dSelect = document.getElementById("dateSelect");
+          const cSelect = document.getElementById("compoundSelect");
+          
+          if (!dSelect.value) {
+              cSelect.innerHTML = `<option value="">-- First Select Date --</option>`;
+              return;
+          }
 
-          if (selectedDate && selectedCompound) {
-              runInterpolation(selectedDate, selectedCompound);
+          const filtered = dailyData.filter(d => d.Date_collect === dSelect.value);
+          const compounds = [...new Set(filtered.map(d => d.Compound))].filter(Boolean).sort();
+          
+          const prevVal = cSelect.value;
+          cSelect.innerHTML = `<option value="">-- Select Compound --</option>`;
+          compounds.forEach(c => cSelect.innerHTML += `<option value="${c}">${c}</option>`);
+          
+          // Try to preserve selection if available
+          if(compounds.includes(prevVal)) cSelect.value = prevVal;
+      }
+
+      function checkRun() {
+          const date = document.getElementById("dateSelect").value;
+          const comp = document.getElementById("compoundSelect").value;
+          
+          if (date && comp) {
+              triggerInterpolation(date, comp);
           } else {
-              resetToOriginalState();
+              resetMapLayers();
           }
       }
 
-      function resetToOriginalState() {
+      // ---------------------------------------------------------
+      // MAP LOGIC
+      // ---------------------------------------------------------
+      function resetMapLayers() {
+          if (window.interpolationLayer) { window.webmap.remove(window.interpolationLayer); window.interpolationLayer = null; }
+          if (window.pointsLayer) { window.webmap.remove(window.pointsLayer); window.pointsLayer = null; }
+          
+          // Restore base layers visibility
+          window.webmap.layers.forEach(l => l.visible = true);
+      }
+
+      function triggerInterpolation(date, comp) {
           const statusDiv = document.getElementById("status");
-          
-          webmap.layers.forEach(layer => {
-             if (layer !== interpolationLayer && layer !== pointsLayer) {
-                 layer.visible = true;
-             }
-          });
-
-          if (interpolationLayer) { webmap.remove(interpolationLayer); interpolationLayer = null; }
-          if (pointsLayer) { webmap.remove(pointsLayer); pointsLayer = null; }
-
-          const selectedDate = document.getElementById("dateSelect").value;
-          if (!selectedDate) {
-             statusDiv.textContent = "Showing all original points.";
-          } else {
-             statusDiv.textContent = "Select a compound to visualize.";
-          }
+          statusDiv.textContent = "Processing...";
           statusDiv.className = "";
+          
+          // Yield to UI thread to show "Processing..."
+          requestAnimationFrame(() => {
+              requestAnimationFrame(() => {
+                  runInterpolation(date, comp);
+              });
+          });
       }
 
       function runInterpolation(selectedDate, selectedCompound) {
         const statusDiv = document.getElementById("status");
-        statusDiv.className = "";
-        statusDiv.textContent = `Processing...`;
 
-        webmap.layers.forEach(layer => {
-            if (layer !== interpolationLayer && layer !== pointsLayer) {
+        // Hide Base Layers
+        window.webmap.layers.forEach(layer => {
+            if (layer !== window.interpolationLayer && layer !== window.pointsLayer) {
                 layer.visible = false;
             }
         });
 
-        const filteredData = allData.filter(d => 
-          d.Date_collect === selectedDate && 
-          d.Compound === selectedCompound &&
-          d.Lon != null && d.Lat != null && d.Adj_ppbV != null
+        // Filter Data
+        const filteredData = dailyData.filter(d => 
+            d.Date_collect === selectedDate && 
+            d.Compound === selectedCompound && 
+            d.Lon != null && d.Lat != null && d.Adj_ppbV != null
         );
 
         if (filteredData.length < 3) {
           statusDiv.textContent = `Insufficient data (${filteredData.length} pts). Need 3+.`;
           statusDiv.className = "error-msg";
-          
-          if (interpolationLayer) { webmap.remove(interpolationLayer); interpolationLayer = null; }
-          if (pointsLayer) { webmap.remove(pointsLayer); pointsLayer = null; }
+          resetMapLayers();
           return;
         }
 
+        // Convert to Turf Points
         const points = turf.featureCollection(
           filteredData.map(d => turf.point([d.Lon, d.Lat], { 
             value: d.Adj_ppbV,
@@ -342,102 +304,71 @@
           }))
         );
 
+        // Stats
         const values = filteredData.map(d => d.Adj_ppbV);
         let minVal = Math.min(...values);
         let maxVal = Math.max(...values);
+        if (minVal === maxVal) { minVal -= 0.0001; maxVal += 0.0001; }
 
-        if (minVal === maxVal) {
-            minVal = minVal - 0.0001;
-            maxVal = maxVal + 0.0001;
-        }
-
-        const options = { gridType: 'hex', property: 'value', units: 'kilometers' };
-        
+        // Interpolate
         let grid;
         try {
-          // grid cell size 0.2km
-          grid = turf.interpolate(points, 0.2, options);
+          grid = turf.interpolate(points, 0.2, { gridType: 'hex', property: 'value', units: 'kilometers' });
         } catch (e) {
           console.error(e);
-          statusDiv.textContent = "Math Error: Points are too close/invalid.";
+          statusDiv.textContent = "Math Error (Points too sparse).";
           statusDiv.className = "error-msg";
           return;
         }
 
-        const gridBlob = new Blob([JSON.stringify(grid)], { type: "application/json" });
-        const gridUrl = URL.createObjectURL(gridBlob);
+        resetMapLayers();
 
-        const pointsBlob = new Blob([JSON.stringify(points)], { type: "application/json" });
-        const pointsUrl = URL.createObjectURL(pointsBlob);
+        // Create Blobs
+        const gridUrl = URL.createObjectURL(new Blob([JSON.stringify(grid)], { type: "application/json" }));
+        const pointsUrl = URL.createObjectURL(new Blob([JSON.stringify(points)], { type: "application/json" }));
 
-        if (interpolationLayer) { webmap.remove(interpolationLayer); }
-        if (pointsLayer) { webmap.remove(pointsLayer); }
-
-        const renderer = {
-          type: "simple",
-          symbol: {
-            type: "simple-fill",
-            outline: { width: 0, color: [0,0,0,0.1] }
-          },
-          visualVariables: [{
-            type: "color",
-            field: "value",
-            stops: [
-              { value: minVal, color: "rgba(0, 255, 0, 0.4)", label: `${minVal.toFixed(2)} ppb` },
-              { value: (minVal + maxVal) / 2, color: "rgba(255, 255, 0, 0.6)" },
-              { value: maxVal, color: "rgba(255, 0, 0, 0.7)", label: `${maxVal.toFixed(2)} ppb` }
-            ]
-          }]
-        };
-
-        interpolationLayer = new GeoJSONLayer({
+        // 1. Interpolation Layer
+        window.interpolationLayer = new GeoJSONLayer({
           url: gridUrl,
           title: `Interpolation: ${selectedCompound}`,
-          renderer: renderer,
-          popupTemplate: {
-            title: "{value} ppb",
-            content: "Estimated concentration level."
-          }
-        });
-
-        const labelClass = {
-          symbol: {
-            type: "text",
-            color: "black",
-            haloColor: "white",
-            haloSize: 1,
-            font: { family: "Arial", size: 10, weight: "bold" }
-          },
-          labelPlacement: "above-center",
-          labelExpressionInfo: { expression: "Text($feature.HouseID)" } 
-        };
-
-        pointsLayer = new GeoJSONLayer({
-          url: pointsUrl,
-          title: `Sensor Points`,
+          opacity: 0.75,
           renderer: {
             type: "simple",
-            symbol: {
-              type: "simple-marker",
-              style: "circle",
-              color: "black",
-              size: "6px",
-              outline: { color: "white", width: 1 }
-            }
+            symbol: { type: "simple-fill", outline: { width: 0, color: [0,0,0,0.1] } },
+            visualVariables: [{
+              type: "color", field: "value",
+              stops: [
+                { value: minVal, color: "rgba(0, 255, 0, 0.6)", label: `${minVal.toFixed(2)} ppb` },
+                { value: (minVal + maxVal)/2, color: "rgba(255, 255, 0, 0.6)" },
+                { value: maxVal, color: "rgba(255, 0, 0, 0.6)", label: `${maxVal.toFixed(2)} ppb` }
+              ]
+            }]
           },
-          labelingInfo: [labelClass],
-          popupTemplate: {
-            title: "House {HouseID}",
-            content: "Concentration: {value} ppb"
-          }
+          popupTemplate: { title: "{value} ppb", content: "Estimated Level" }
         });
 
-        webmap.add(interpolationLayer);
-        webmap.add(pointsLayer);
+        // 2. Points Layer
+        window.pointsLayer = new GeoJSONLayer({
+          url: pointsUrl,
+          title: "Sensors",
+          renderer: {
+            type: "simple",
+            symbol: { type: "simple-marker", style: "circle", color: "black", size: "6px", outline: {color:"white", width:1} }
+          },
+          labelingInfo: [{
+            symbol: { type: "text", color: "black", haloColor: "white", haloSize: 1, font: {family: "Arial", size: 10, weight: "bold"} },
+            labelPlacement: "above-center",
+            labelExpressionInfo: { expression: "Text($feature.HouseID)" }
+          }],
+          popupTemplate: { title: "House {HouseID}", content: "Value: {value} ppb" }
+        });
 
-        view.goTo(points).catch(err => {});
+        window.webmap.add(window.interpolationLayer);
+        window.webmap.add(window.pointsLayer);
         
+        view.goTo(points).catch(err => {});
         statusDiv.textContent = `Visualizing ${selectedCompound} (${filteredData.length} sensors)`;
+        statusDiv.className = "success-msg";
       }
     });
   </script>
