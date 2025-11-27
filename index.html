@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <title>Air Pollutant Interpolation (IDW)</title>
+
+  <!-- Load ArcGIS CSS -->
+  <link rel="stylesheet" href="https://js.arcgis.com/4.28/esri/themes/light/main.css" />
+
+  <!-- CRITICAL FIX: Load Third-Party Libraries BEFORE ArcGIS JS API -->
+  <script src="https://unpkg.com/@turf/turf/turf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+
+  <!-- Load ArcGIS Maps SDK for JavaScript (MUST BE LAST) -->
+  <script src="https://js.arcgis.com/4.28/"></script>
+
+  <style>
+    html, body, #viewDiv {
+      padding: 0;
+      margin: 0;
+      height: 100%;
+      width: 100%;
+    }
+
+    /* Floating Control Panel */
+    #controls {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      background-color: white;
+      padding: 15px;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+      width: 250px;
+      font-family: "Avenir Next", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      z-index: 99;
+    }
+
+    #controls h3 {
+      margin-top: 0;
+      color: #0079c1;
+      font-size: 1.2rem;
+    }
+
+    .form-group {
+      margin-bottom: 15px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 5px;
+      font-weight: bold;
+      font-size: 0.9rem;
+    }
+
+    select {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+
+    #btn-update {
+      width: 100%;
+      padding: 10px;
+      background-color: #0079c1;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-weight: bold;
+    }
+
+    #btn-update:hover {
+      background-color: #005a8f;
+    }
+
+    #status {
+      margin-top: 10px;
+      font-size: 0.85rem;
+      color: #555;
+    }
+    
+    .error-msg {
+        color: #d90000;
+        font-weight: bold;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="viewDiv"></div>
+
+  <div id="controls">
+    <h3>Interpolation Settings</h3>
+    
+    <div class="form-group">
+      <label for="dateSelect">Select Date:</label>
+      <select id="dateSelect" disabled>
+        <option>Loading data...</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label for="compoundSelect">Select Compound:</label>
+      <select id="compoundSelect" disabled>
+        <option>Loading data...</option>
+      </select>
+    </div>
+
+    <button id="btn-update" disabled>Interpolate Surface</button>
+    
+    <div id="status">Waiting for data...</div>
+  </div>
+
+  <script>
+    require([
+      "esri/WebMap",
+      "esri/views/MapView",
+      "esri/layers/GeoJSONLayer",
+      "esri/widgets/Legend",
+      "esri/widgets/Expand"
+    ], function(WebMap, MapView, GeoJSONLayer, Legend, Expand) {
+
+      const webmap = new WebMap({
+        portalItem: {
+          id: "63a264ef1b5f4bbab8cdb2b592c29ae6" 
+        }
+      });
+
+      const view = new MapView({
+        container: "viewDiv",
+        map: webmap
+      });
+
+      const legend = new Legend({ view: view });
+      const legendExpand = new Expand({
+        view: view,
+        content: legend,
+        expanded: true
+      });
+      view.ui.add(legendExpand, "bottom-left");
+
+      let allData = [];
+      let interpolationLayer = null;
+      let pointsLayer = null;
+
+      // URL to your CSV
+      const csvUrl = "https://raw.githubusercontent.com/gladcolor/air_pollutants/master/VOC_With_Coords.csv";
+
+      // 2. Fetch and Parse CSV
+      Papa.parse(csvUrl, {
+        download: true,
+        header: true,
+        dynamicTyping: true,
+        skipEmptyLines: true,
+        complete: function(results) {
+          allData = results.data;
+          console.log("Data loaded:", allData.length, "rows");
+          initApp(allData);
+        },
+        error: function(err) {
+          document.getElementById("status").textContent = "Error loading CSV.";
+          console.error(err);
+        }
+      });
+
+      // 3. Initialize App and Controls
+      function initApp(data) {
+        const dateSelect = document.getElementById("dateSelect");
+        const compoundSelect = document.getElementById("compoundSelect");
+        const btn = document.getElementById("btn-update");
+
+        const dates = [...new Set(data.map(d => d.Date_collect))].filter(Boolean).sort();
+
+        dateSelect.innerHTML = "";
+        dates.forEach(date => {
+          const option = document.createElement("option");
+          option.value = date;
+          option.textContent = date;
+          dateSelect.appendChild(option);
+        });
+
+        dateSelect.addEventListener("change", () => updateCompoundDropdown(data));
+        btn.addEventListener("click", runInterpolation);
+
+        dateSelect.disabled = false;
+        compoundSelect.disabled = false;
+        btn.disabled = false;
+        document.getElementById("status").textContent = "Ready.";
+
+        if (dates.length > 0) {
+            updateCompoundDropdown(data);
+        }
+      }
+
+      function updateCompoundDropdown(data) {
+          const dateSelect = document.getElementById("dateSelect");
+          const compoundSelect = document.getElementById("compoundSelect");
+          const selectedDate = dateSelect.value;
+
+          const relevantData = data.filter(d => d.Date_collect === selectedDate);
+          const compounds = [...new Set(relevantData.map(d => d.Compound))].filter(Boolean).sort();
+
+          compoundSelect.innerHTML = "";
+          
+          if(compounds.length === 0) {
+              const option = document.createElement("option");
+              option.textContent = "No data for this date";
+              compoundSelect.appendChild(option);
+              return;
+          }
+
+          compounds.forEach(comp => {
+            const option = document.createElement("option");
+            option.value = comp;
+            option.textContent = comp;
+            compoundSelect.appendChild(option);
+          });
+
+          runInterpolation();
+      }
+
+      // Helper function to hide the original WebMap layers
+      function hideOriginalLayers() {
+        webmap.layers.forEach(layer => {
+            // Check if the layer is NOT one of our generated layers
+            if (layer !== interpolationLayer && layer !== pointsLayer) {
+                // You can target specific layers by title if preferred:
+                // if (layer.title === "VOC_Houses") ...
+                layer.visible = false;
+            }
+        });
+      }
+
+      // 5. Core Interpolation Logic
+      function runInterpolation() {
+        const selectedDate = document.getElementById("dateSelect").value;
+        const selectedCompound = document.getElementById("compoundSelect").value;
+        const statusDiv = document.getElementById("status");
+        
+        statusDiv.className = "";
+        statusDiv.textContent = `Processing ${selectedCompound}...`;
+
+        // Hide original webmap points so they don't overlap
+        hideOriginalLayers();
+
+        // A. Filter Data
+        const filteredData = allData.filter(d => 
+          d.Date_collect === selectedDate && 
+          d.Compound === selectedCompound &&
+          d.Lon != null && d.Lat != null && d.Adj_ppbV != null
+        );
+
+        if (filteredData.length < 3) {
+          statusDiv.textContent = `Insufficient data: Found ${filteredData.length} points. Need 3+.`;
+          statusDiv.className = "error-msg";
+          
+          if (interpolationLayer) { webmap.remove(interpolationLayer); interpolationLayer = null; }
+          if (pointsLayer) { webmap.remove(pointsLayer); pointsLayer = null; }
+          return;
+        }
+
+        // B. Convert to Turf.js Points
+        const points = turf.featureCollection(
+          filteredData.map(d => turf.point([d.Lon, d.Lat], { 
+            value: d.Adj_ppbV,
+            HouseID: d.HouseID 
+          }))
+        );
+
+        const values = filteredData.map(d => d.Adj_ppbV);
+        const minVal = Math.min(...values);
+        const maxVal = Math.max(...values);
+
+        // C. Perform Interpolation (IDW)
+        const options = { gridType: 'hex', property: 'value', units: 'kilometers' };
+        
+        let grid;
+        try {
+          // REDUCED CELL SIZE: Changed from 2 to 0.2 kilometers
+          // This makes the hexagons much smaller and the surface smoother
+          grid = turf.interpolate(points, 0.2, options);
+        } catch (e) {
+          console.error(e);
+          statusDiv.textContent = "Math Error: Points are too close or invalid.";
+          statusDiv.className = "error-msg";
+          return;
+        }
+
+        // D. Create Blob URLs
+        const gridBlob = new Blob([JSON.stringify(grid)], { type: "application/json" });
+        const gridUrl = URL.createObjectURL(gridBlob);
+
+        const pointsBlob = new Blob([JSON.stringify(points)], { type: "application/json" });
+        const pointsUrl = URL.createObjectURL(pointsBlob);
+
+        // E. Remove old layers
+        if (interpolationLayer) { webmap.remove(interpolationLayer); }
+        if (pointsLayer) { webmap.remove(pointsLayer); }
+
+        // F. Create New ArcGIS Layers
+
+        // 1. The Interpolation Layer (Bottom)
+        const renderer = {
+          type: "simple",
+          symbol: {
+            type: "simple-fill",
+            outline: { width: 0, color: [0,0,0,0.1] }
+          },
+          visualVariables: [{
+            type: "color",
+            field: "value",
+            stops: [
+              { value: minVal, color: "rgba(0, 255, 0, 0.4)", label: `${minVal.toFixed(2)} ppb` },
+              { value: (minVal + maxVal) / 2, color: "rgba(255, 255, 0, 0.6)" },
+              { value: maxVal, color: "rgba(255, 0, 0, 0.7)", label: `${maxVal.toFixed(2)} ppb` }
+            ]
+          }]
+        };
+
+        interpolationLayer = new GeoJSONLayer({
+          url: gridUrl,
+          title: `Interpolation: ${selectedCompound}`,
+          renderer: renderer,
+          popupTemplate: {
+            title: "{value} ppb",
+            content: "Estimated concentration level."
+          }
+        });
+
+        // 2. The Points Layer (Top)
+        const labelClass = {
+          symbol: {
+            type: "text",
+            color: "black",
+            haloColor: "white",
+            haloSize: 1,
+            font: { family: "Arial", size: 10, weight: "bold" }
+          },
+          labelPlacement: "above-center",
+          labelExpressionInfo: { expression: "$feature.HouseID" }
+        };
+
+        pointsLayer = new GeoJSONLayer({
+          url: pointsUrl,
+          title: `Sensor Points`,
+          renderer: {
+            type: "simple",
+            symbol: {
+              type: "simple-marker",
+              style: "circle",
+              color: "black",
+              size: "6px",
+              outline: { color: "white", width: 1 }
+            }
+          },
+          labelingInfo: [labelClass],
+          popupTemplate: {
+            title: "House {HouseID}",
+            content: "Concentration: {value} ppb"
+          }
+        });
+
+        webmap.add(interpolationLayer);
+        webmap.add(pointsLayer);
+
+        view.goTo(points).catch(err => {});
+        
+        statusDiv.textContent = `Showing ${filteredData.length} points for ${selectedCompound}`;
+      }
+    });
+  </script>
+</body>
+</html>
